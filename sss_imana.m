@@ -38,14 +38,6 @@ else
     fprintf('Workdir not found. Mount or connect to server and try again.');
 end
 
-% 
-% addpath(genpath(workdir));
-% addpath(genpath('/home/ROBARTS/skim2764/imaging_tools'));
-% addpath(genpath('/cifs/diedrichsen/matlab/spm12'));
-% addpath(genpath('/cifs/diedrichsen/matlab/dataframe'));
-% addpath(genpath(['/cis/diedrichsen/matlab/imaging/surfing']));
-
-
 baseDir         = (sprintf('%s/',workdir));     % Base directory of the project
 BIDSDir        = 'BIDS';                       % Raw data post AutoBids conversion
 behavDir        = 'behavDir';           % Timing data from the scanner
@@ -61,12 +53,7 @@ glmDir = '/glm_%d';
 roiDir = 'ROI';
 
 pathToSave = fullfile(baseDir,'Figures');
-% atlasDir = 
-% 
-% % % addpath(genpath(['/Volumes/Diedrichsen_data$/matlab/dataframe']));
-% % % addpath(genpath(['/Volumes/Diedrichsen_data$/matlab/spm12']));
-% % % % % % addpath(genpath(['/Volumes/Diedrichsen_data$/matlab/imaging']));
-% addpath(genpath(['/srv/diedrichsen/matlab/spm12']));
+
 % addpath(genpath(['/srv/diedrichsen/matlab/dataframe']));
 % addpath(genpath(fullfile(workdir,'scripts')));
 % addpath(genpath(fullfile(workdir,behavDir)));
@@ -762,18 +749,144 @@ switch(what)
         movefile(source,dest);
         % end
         
+    case 'HRF:fit' % finding optimal parameters for hrf
+        % we have a instruction and a movement trial type and we want to
+        % find a set of parameter that works for both. The important thing
+        % is that the duration of underlying neural event is the only thing
+        % that is different between these two trial types.
+        regSide = [1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2];
+        regType=[1 2 3 4 5 6 7 8 1 2 3 4 5 6 7 8];
+        sn = subj_vec;
+        glm = 2;
+        regN = [2 3]; % M1 and PMd
+        duration = 0;
+        onsetshift = 0;
+        pre = 5;
+        post = 25;
+        fig = 1;
+        vararginoptions(varargin, {'sn', 'glm', 'regN', 'duration', 'onsetshift', 'pre', 'post', 'fig'});
+        cwd = pwd;
+        
+        
+        % loop over the subject - TODO: group fitting
+        for s = sn
+            % initialize
+            %T = [];
+            %FIT = [];
+            
+            fprintf('subject %.2d\n', s);
+            
+            cd(fullfile(sprintf(glmDir, glm), sprintf('s%02d', s))); % cd to subject's GLM dir
+            load SPM;
+            
+            % updating the filenames - since I ran the code on server
+            if ~strcmp(fullfile(sprintf(glmDir, glm), sprintf('s%02d', s)), SPM.swd) % need to rename SPM
+                SPM = spmj_move_rawdata(SPM, fullfile(imagingDir, sprintf('s%02d', s)));
+            end
+            
+            load(fullfile(roiDir, sprintf('%s_Brodmann_regions.mat', sprintf('s%02d', s))));
+            %load(fullfile(roiDir, sprintf('%s_Wang_regions.mat', sprintf('s%02d', s))));
+            R = R(regN); % only use the specified regions
+            
+            Data = region_getdata(SPM.xY.VY, R);
+            
+            reg=[];
+            data=[];
+            for i = 1:length(Data)
+                reg = [reg ones(1,size(Data{i},2))*regN(i)];
+                data = [data Data{i}];
+            end
+            clear Data
+            
+            Y = spm_filter(SPM.xX.K, SPM.xX.W*data); % filter out low-frequence trends in Y
+            Yres = spm_sp('r', SPM.xX.xKXs, Y);
+            err_before = sum(sum(Yres.^2))/numel(Yres);
+            
+            for r = 1:length(SPM.nscan)
+                for u=1:length(SPM.Sess(r).U)
+                    SPM.Sess(r).U(u).dur = ones(size(SPM.Sess(r).U(u).dur))*duration;
+                    SPM.Sess(r).U(u).ons = SPM.Sess(r).U(u).ons+onsetshift;
+                end
+                SPM.Sess(r).U=spm_get_ons(SPM,r);
+            end
+            
+            % Fit a common hrf for specified regions
+            [P, SPM, Yhat, Yres] = fit_hrf(SPM, data, 'P0', [18 2]','fit',[1 2]');  % 'fit',[1,2]'  
+            
+            % Check Error after
+            err_after = sum(sum(Yres.^2))/numel(Yres);
+            
+            % Extract evoked response
+            D = spmj_get_ons_struct(SPM);
+            
+            D.numPresses = zeros(size(D.event));
+            D.numPresses(D.event<=3) = 1;
+            D.numPresses(D.event>3 & D.event<7) = 3;
+            D.cond = D.event;
+            D.cond(D.event>3 & D.event<7) = D.event(D.event>3 & D.event<7)-3;
+            D.cond(D.event==7) = 4; % instruction
+            
+            T=[];
+            for r = regN
+                y_hat = mean(Yhat(:,reg==r), 2); % mean across voxels in each region
+                y_res = mean(Yres(:,reg==r), 2);
+                y_real = mean(Y(:,reg==r), 2);
+                for i = 1:size(D.block,1)
+                    D.y_hat(i,:) = cut(y_hat,pre,round(D.ons(i)),post,'padding','nan')';
+                    D.y_res(i,:) = cut(y_res,pre,round(D.ons(i)),post,'padding','nan')';
+                    D.y_real(i,:) = cut(y_real,pre,round(D.ons(i)),post,'padding','nan')';
+                    D.y_adj(i,:) = D.y_hat(i,:)+D.y_res(i,:);
+                end
+                D.region = ones(size(D.event,1),1)*r;
+                D.sn = ones(size(D.event,1),1)*s;
+                T = addstruct(T,D);
+            end
+            T.regType = regType(T.region)';
+            T.regSide = regSide(T.region)';
+            T.hand = 2*ones(size(T.region)); % only right hand
+            
+            %T = addstruct(T,D);
+            
+            if (fig==1)
+                %subplot(2,1,1);
+                figure()
+                op2_imana('HRF:plot_reg', T, s, [2]);
+                title(sprintf('Subj %d, Error: %2.3f', s, err_after));
+                
+                %subplot(2,1,2);
+                %op2_imana('HRF:plot_reg',Tnew,s,[2 3 6 8]);
+                %title(sprintf('Error: %2.3f',err_after));
+                
+                %keyboard;
+            end
+            
+            F.P = P';
+            F.bf = SPM.xBF.bf';
+            F.err_before = err_before;
+            F.err_after = err_after;
+            
+            %FIT = addstruct(FIT,F);
+            
+            % save
+            save(fullfile(roiDir, sprintf('%s_hrf_ROI_timeseries_glm%d.mat', sprintf('s%02d', s), glm)), '-struct', 'T');
+            save(fullfile(roiDir, sprintf('%s_hrf_fit_glm%d.mat', sprintf('s%02d', s), glm)), '-struct', 'F');
+            
+            cd(cwd)
+        end
+        
 
     case 'GLM:design'
         % handling input args:
         sn = [];
         prefix = 'u';
         % TODO
-        hrf_params = [5 10];
+        hrf_params = [4 10];
         hrf_cutoff = 128;
         cvi_type = 'wls';
         nTR = 410; %% modify when necessary
         vararginoptions(varargin,{'sn','glm'});        
-        run_list = str2double(split(pinfo.runlist{sn},'.'));
+%        run_list = str2double(split(pinfo.runlist{sn},'.'));
+        run_list = [1:8];
         % Save the aux. information file (SPM_info.mat).
         % This file contains user-friendly information about the glm
         % model, regressor types, condition names, etc.
@@ -781,7 +894,9 @@ switch(what)
         % initialize 
         J = struct();
         % load preprocessed behavioral data
+        %if glm~=0
         R = construct_dsgmat(sn, glm); %% Important: index of R indicates a trial number
+        %end
         J.dir = {fullfile(baseDir, sprintf(glmDir, glm), sprintf('S%02d', sn))};
         J.timing.units = 'secs'; % timing unit that all timing in model will be
         J.timing.RT = 1; % TR (in seconds, as per 'J.timing.units')
@@ -793,19 +908,26 @@ switch(what)
         end
         % loop through runs within the current sessions
         % itaskUni = 0;
-
+        if glm==0  %% for 9th run, slow-event design
+           run_list = 9; % use run 09
+           nTR = 385; % number of TRs for run 09
+           R.cond = ones(1,nTR);
+           
+        end
         n_cond = length(unique(R.cond));
         for r=1:length(run_list)
             % get functional runs
             for i=1:nTR
-                N{i} = fullfile(baseDir,imagingDir,sprintf('S%02d', sn),[prefix sprintf('S%02d_run_%02d',sn,r) '.nii,',num2str(i)]);
+                N{i} = fullfile(baseDir,imagingDir,sprintf('S%02d', sn),[prefix sprintf('S%02d_run_%02d',sn,run_list(r)) '.nii,',num2str(i)]);
             end;                
             J.sess(r).scans= N;
-            
-            if glm==1
+            if glm==0
+                cond_name{1} = 'All trials';  %% only for 9th run
+            elseif glm==1
                 for c=1:n_cond cond_name{c} = sprintf('Trial %d',c);end
             elseif glm==2 
-                cond_name = {'MotorOnly-Rep','CueOnly-Rep','Both-Rep','Non-Rep','Non-Interest'};
+                cond_name = {'MotorOnly-L','MotorOnly-S','CueOnly-L','CueOnly-S',...
+                            'BothRep-L','BothRep-S','NonRep-L','NonRep-S','Non-Interest'};
             elseif glm==3
                 for c=1:n_cond cond_name{c} = sprintf('Trial-State %d',c);end;
                 cond_name{n_cond+1} = 'Non-Interest';
@@ -842,15 +964,20 @@ switch(what)
                 % J.sess(r).cond(c).name = sprintf('transition %d',c);
                 % J.sess(r).cond(c).onset = R.onset(r,find(R.cond(r,:)==c));
                 % J.sess(r).cond(c).duration = R.dur(r,find(R.cond(r,:)==c));
-                if glm==1
+                if glm==0
+                    J.sess(1).cond(1).name = 'All trials';
+                    J.sess(1).cond(1).onset = R.onset';
+                    J.sess(1).cond(1).duration = 1;
+                elseif glm==1
                     J.sess(r).cond(c).name = sprintf('trial %d',c);
                     J.sess(r).cond(c).onset = R.onset(r,c);
-                    J.sess(r).cond(c).duration = 2; % used fixed time, 2 secon
+                    J.sess(r).cond(c).duration = 1; % used fixed time, 2 secon
                     % J.sess(r).cond(c).duration = R.dur(r,c);
                 else
                     J.sess(r).cond(c).name = cond_name{c};
                     J.sess(r).cond(c).onset = R.onset(r,find(R.cond(r,:)==c));
-                    J.sess(r).cond(c).duration = R.dur(r,find(R.cond(r,:)==c));
+                    J.sess(r).cond(c).duration = 1; % used fixed time, 2 secon
+%                     J.sess(r).cond(c).duration = R.dur(r,find(R.cond(r,:)==c));
                 end
                 J.sess(r).cond(c).tmod=0;
                 J.sess(r).cond(c).orth=0;
@@ -883,8 +1010,11 @@ switch(what)
         % Save the GLM file for this subject.
         spm_rwls_run_fmri_spec(J);
         % dsave(fullfile(J.dir{1},sprintf('%s_reginfo.tsv', subj_str{s})), T);
-
-        save(fullfile(J.dir{1}, 'SPM_info.mat'),'R');
+        if glm==0
+            save(fullfile(J.dir{1}, 'SPM_info_run9.mat'),'R');            
+        else
+            save(fullfile(J.dir{1}, 'SPM_info.mat'),'R');
+        end
         % save(fullfile(J.dir{1}, 'SPM_info.mat'),'-struct','T');
     
     
@@ -973,7 +1103,16 @@ switch(what)
 %                 optC(3*length(cond_list)+2,:) = [optW(1,:)  zeros(1,nRun)];
 %                 optC(3*length(cond_list)+3,:) = optC(3*length(cond_list)+1,:) - optC(3*length(cond_list)+2,:);
 %                 optC(3*length(cond_list)+4,:) = (optC(3*length(cond_list)+1,:) + optC(3*length(cond_list)+2,:))/2;  
-                contrast_names = {'MotorR','MotorN','MotorR-MotorN','CueR','CueN','CueR-CueN','BothR','BothN','BothR-BothN'};
+                contrast_names = {'MotorR','MotorN','MotorR-N','CueR','CueN','CueR-N','BothR','BothN','BothR-N',...
+                              'MotorOnly','CueOnly','MotorOnly-CueOnly',...
+                               'Letter','Spatial','Letter-Spatial',...
+                                'BothRep-CueOnly','MotorOnly-BothN'
+                                % 'BothRep-CueOnly-L','BothRep-CueOnly-S','BothRep-CueOnly-L-S',...
+                              % 'MotorOnly-L','MotorOnly-S','CueOnlyRep-Letter','CueOnlyRep-Spatial',...
+                              };
+
+
+
                 X = SPM.xX.X(:,1:end-length(SPM.nscan));
                 optC(1,:) = calc_optWeights2(R.isRepMotor, X);
                 optC(2,:) = calc_optWeights2(R.isNRepMotor, X);
@@ -984,22 +1123,71 @@ switch(what)
                 optC(7,:) = calc_optWeights2(R.isRepBoth, X);
                 optC(8,:) = calc_optWeights2(R.isNRep, X);
                 optC(9,:) = optC(7,:)-optC(8,:);
+                optC(10,:) = calc_optWeights2(~R.isRepBoth.*R.isRepMotor, X);                
+                optC(11,:) = calc_optWeights2(~R.isRepBoth.*R.isRepCue, X);
+                optC(12,:) = optC(10,:)-optC(11,:);
+                optC(13,:) = calc_optWeights2(R.isLetter, X);
+                optC(14,:) = calc_optWeights2(R.isSpatial, X);
+                optC(15,:) = optC(13,:)-optC(14,:);
+                optC(16,:) = optC(7,:)-optC(11,:);
+                optC(17,:) = optC(10,:)-optC(8,:);
+
+
+                % optC(12,:) = calc_optWeights2(R.isRepBoth.*R.isLetter,X)-calc_optWeights2(~R.isRepBoth.*R.isRepMotor.*R.isLetter, X);
+                % optC(13,:) = calc_optWeights2(R.isRepBoth.*R.isSpatial,X)-calc_optWeights2(~R.isRepBoth.*R.isRepMotor.*R.isSpatial, X);
+                % optC(14,:) = calc_optWeights2(R.isRepBoth.*R.isLetter,X)-calc_optWeights2(~R.isRepBoth.*R.isRepCue.*R.isLetter, X);
+                % optC(15,:) = calc_optWeights2(R.isRepBoth.*R.isSpatial,X)-calc_optWeights2(~R.isRepBoth.*R.isRepCue.*R.isSpatial, X);
             end
         elseif glm==2 
 %             contrast_names = {'MotorR','MotorN','MotorR-MotorN','CueR','CueN','CueR-CueN','BothR','BothN','BothR-BothN','MotorR-BothR', 'CueR-BothR'};
             %contrast_names = {'MotorR-MotorN', 'CueR-CueN','BothR-BothN'}; 
-             contrast_names = {'MotorR','MotorN','MotorR-MotorN','CueR','CueN','CueR-CueN','BothR','BothN','BothR-BothN'};
-            optC(1,:) = [repmat([1 0 1 0 0], 1, nRun) zeros(1,nRun)]/(2*nRun);
-            optC(2,:) = [repmat([0 1 0 1 0], 1, nRun) zeros(1,nRun)]/(2*nRun);
-            optC(3,:) = [repmat([1 -1 1 -1 0],1, nRun) zeros(1,nRun)]/(2*nRun);
-            optC(4,:) = [repmat([0 1 1 0 0],1, nRun) zeros(1,nRun)]/(2*nRun)           
-            optC(5,:) = [repmat([1 0 0 1 0],1, nRun) zeros(1,nRun)]/(2*nRun);
-            optC(6,:) = [repmat([-1 1 1 -1 0],1, nRun) zeros(1,nRun)]/(2*nRun);
-            optC(7,:) = [repmat([0 0 1 0 0],1, nRun) zeros(1,nRun)]/nRun;
-            optC(8,:) = [repmat([0 0 0 1 0],1, nRun) zeros(1,nRun)]/nRun;
-            optC(9,:) = [repmat([0 0 1 -1 0],1, nRun) zeros(1,nRun)]/nRun;
+%             cond_name = {'MotorOnly-L','MotorOnly-S','CueOnly-L','CueOnly-S',...
+%                             'BothRep-L''BothRep-S','NonRep-L','NonRep-S','Non-Interest'};                
+            contrast_names = {'MotorR','MotorN','MotorR-N',...
+                                'CueR','CueN','CueR-N','BothR','BothN','BothR-N',...
+                                'MotorOnly','CueOnly','MotorOnly-CueOnly',...
+                                'MotorR-L','MotorR-S','MotorR-L-S',...
+                                'CueR-L','CueR-S','CueR-L-S',...
+                                'Letter','Spatial','Letter-Spatial',...
+                                'BothRep-L','BothRep-S','BothRep-L-S',...
+                                'CueOnly-L','CueOnly-S','CueOnly-L-S',...
+                                'BothRep-CueOnly-L','BothRep-CueOnly-S','BothRep-CueOnly-L-S',...
+                                'BothRep-CueOnly','MotorOnly-BothN'};
+            optC(1,:) = [repmat([1 1 0 0 1 1 0 0 0],1, nRun) zeros(1,nRun)]/(4*nRun);
+            optC(2,:) = [repmat([0 0 1 1 0 0 1 1 0],1, nRun) zeros(1,nRun)]/(4*nRun);
+            optC(3,:) = optC(1,:)-optC(2,:);
+            optC(4,:) = [repmat([0 0 1 1 1 1 0 0 0],1, nRun) zeros(1,nRun)]/(4*nRun);
+            optC(5,:) = [repmat([1 1 0 0 0 0 1 1 0],1, nRun) zeros(1,nRun)]/(4*nRun);
+            optC(6,:) = optC(4,:)-optC(5,:);
+            optC(7,:) = [repmat([0 0 0 0 1 1 0 0 0],1, nRun) zeros(1,nRun)]/(2*nRun);
+            optC(8,:) = [repmat([0 0 0 0 0 0 1 1 0],1, nRun) zeros(1,nRun)]/(2*nRun);
+            optC(9,:) = optC(7,:)-optC(8,:);
+            optC(10,:) = [repmat([1 1 0 0 0 0 0 0 0],1, nRun) zeros(1,nRun)]/(2*nRun);
+            optC(11,:) = [repmat([0 0 1 1 0 0 0 0 0],1, nRun) zeros(1,nRun)]/(2*nRun);
+            optC(12,:) = optC(10,:)-optC(11,:);    
 
+            optC(13,:) = [repmat([1 0 0 0 1 0 0 0 0],1, nRun) zeros(1,nRun)]/(2*nRun);
+            optC(14,:) = [repmat([0 1 0 0 0 1 0 0 0],1, nRun) zeros(1,nRun)]/(2*nRun);
+            optC(15,:) = optC(13,:)-optC(14,:);
+            optC(16,:) = [repmat([0 0 1 0 1 0 0 0 0],1, nRun) zeros(1,nRun)]/(2*nRun);
+            optC(17,:) = [repmat([0 0 0 1 0 1 0 0 0],1, nRun) zeros(1,nRun)]/(2*nRun);
+            optC(18,:) = optC(16,:)-optC(17,:);
+            optC(19,:) = [repmat([1 0 1 0 1 0 1 0 0],1, nRun) zeros(1,nRun)]/(4*nRun);
+            optC(20,:) = [repmat([0 1 0 1 0 1 0 1 0],1, nRun) zeros(1,nRun)]/(4*nRun);
+            optC(21,:) = optC(19,:)-optC(20,:);
+            optC(22,:) = [repmat([0 0 0 0 1 0 0 0 0],1, nRun) zeros(1,nRun)]/(nRun);
+            optC(23,:) = [repmat([0 0 0 0 0 1 0 0 0],1, nRun) zeros(1,nRun)]/(nRun);
+            optC(24,:) = optC(22,:)-optC(23,:);
 
+            optC(25,:) = [repmat([0 0 1 0 0 0 0 0 0],1, nRun) zeros(1,nRun)]/(nRun);
+            optC(26,:) = [repmat([0 0 0 1 0 0 0 0 0],1, nRun) zeros(1,nRun)]/(nRun);
+            optC(27,:) = optC(25,:)-optC(26,:);
+
+            optC(28,:) = [repmat([0 0 -1 0 1 0 0 0 0],1, nRun) zeros(1,nRun)]/(nRun);
+            optC(29,:) = [repmat([0 0 0 -1 0 1 0 0 0],1, nRun) zeros(1,nRun)]/(nRun);
+            optC(30,:) = optC(28,:)-optC(29,:);
+            optC(31,:) = [repmat([0 0 -1 -1 1 1 0 0 0],1, nRun) zeros(1,nRun)]/(2*nRun);
+            optC(32,:) = optC(10,:)-optC(8,:);
 
         elseif glm==3  %% encoding trial-state, 9th state is for non-interest
             n_cond = length(unique(R.cond));
@@ -1177,12 +1365,12 @@ switch(what)
 
     case 'WB:vol2surf_group' % map group contrasts on surface (.gifti)
         %sn = subj_vec;
-        glm = 1;
+        %glm = 1;
         hemis = [1 2];
         map = 'psc'; % 't'; 'con'; 'dist'; 'psc';
         surf = '32k';
-        %vararginoptions(varargin,{'sn', 'glm', 'hemis', 'map', 'surf'});
-        vararginoptions(varargin,{'sn'});
+        vararginoptions(varargin,{'sn', 'glm'});
+        %vararginoptions(varargin,{'sn'});
         groupDir = fullfile(baseDir, wbDir, sprintf('group%s', surf));
 %         dircheck(groupDir);
         subjGLM = fullfile(baseDir,sprintf(glmDir, glm), 'S01');
@@ -1218,6 +1406,185 @@ switch(what)
             fprintf(1, 'Done.\n');
         end
 
+
+    case 'WB:vol2surf_stats' % perform group stats on surface (.gifti)
+        % sn = subj_vec;
+%         glm   = 1;
+        hemis = [1 2];
+        map   = 'psc'; % 't'; 'con'; 'psc';
+        sm    = 3;     % smoothing kernel in mm (optional)
+        surf  = '32';  % 164k or 32k vertices
+        % vararginoptions(varargin,{'sn', 'glm', 'hemis', 'map', 'sm', 'surf'});
+        vararginoptions(varargin,{'sn','glm'});
+        groupDir = fullfile(baseDir,wbDir, sprintf('group%sk', surf));
+%        dircheck(groupDir);
+        subjGLM = fullfile(baseDir,sprintf(glmDir, glm), 'S01');
+        load(fullfile(subjGLM, 'SPM.mat'));
+        % Loop over the metric files and calculate the cSPM of each
+        for h = hemis
+            fprintf(1, '%s ... \n', hemi{h});
+            groupfiles = cell(1);
+            switch map
+                case 't' % t-values maps (univariate GLM)
+                    con = SPM.xCon;
+                    nc  = numel(con);
+                    con_name = cell(1);
+                    for ic = 1:nc
+                        con_name{ic} = con(ic).name;
+                    end
+                case 'con' % contrast beta maps (univariate GLM)
+                    con = SPM.xCon;
+                    nc  = numel(con);
+                    con_name = cell(1);
+                    for ic = 1:nc
+                        con_name{ic} = con(ic).name;
+                    end                    
+                case 'psc' % percent signal change maps (univariate GLM)
+                    con = SPM.xCon;
+                    nc  = numel(con);
+                    con_name = cell(1);
+                    for ic = 1:nc
+                        con_name{ic} = con(ic).name;
+                    end
+            end
+            % Perform stats
+            for ic = 1:nc
+                groupfiles{ic} = fullfile(groupDir, sprintf('group.%s.%s.glm%d.%s.func.gii', map, hem{h}, glm, con_name{ic}));
+%                 metric = gifti(groupfiles{ic});
+%                 data = double(metric.cdata);
+%                 
+%                 % Do the uw noise normalization
+%                 subj_count=0;
+%                 for s = sn
+%                     subj_count=subj_count+1;
+%                     surfDir = fullfile(wbDir, sprintf('s%02d', s));
+%                     res = gifti(fullfile(surfDir, sprintf('%s.%s.glm%d.res.func.gii', sprintf('s%02d', s), hem{h}, glm)));
+%                     res = double(res.cdata);
+%                     data(res>0,subj_count) = data(res>0,subj_count)./sqrt(res(res>0)); 
+%                 end
+%                 
+%                 % save the new group map for this particular contrast
+%                 G = surf_makeFuncGifti(data,'anatomicalStruct',hname{h},'columnNames',surf_getGiftiColumnNames(metric));
+%                 newname = fullfile(groupDir, sprintf('uwgroup.%s.%s.glm%d.%s.func.gii', map, hem{h}, glm, con_name{ic}));
+%                 save(G,newname);
+                
+                
+                % Perform smoothing (optional)
+                if sm>0
+                    surface = fullfile(atlasDir, sprintf('FS_LR_%s/fs_LR.%sk.%s.flat.surf.gii', surf, surf, hem{h}));
+                    groupfiles{ic}  = surf_smooth(groupfiles{ic}, 'surf', surface, 'kernel', sm);
+                    %groupfiles{ic}  = surf_smooth(newname, 'surf', surface, 'kernel', sm);
+                end
+                metric          = gifti(groupfiles{ic});
+                
+                
+                
+                cSPM            = surf_getcSPM('onesample_t', 'data', metric.cdata); %, 'maskthreshold',0.5); % set maskthreshold to 0.5 = calculate stats at location if 50% of subjects have data at this point
+                C.data(:, ic)   = cSPM.con.con; % mean
+                C.c_name{ic}    = ['mean_' con_name{ic}];
+                C.data(:,ic+nc) = cSPM.con.Z;   % t (confusing)
+                C.c_name{ic+nc} = ['t_' con_name{ic}];
+            end
+            % Save output
+            O = surf_makeFuncGifti(C.data, 'columnNames', C.c_name, 'anatomicalStruct', hname{h});
+            %summaryfile = fullfile(groupDir, sprintf('uwsummary.%s.glm%d.%s.sm%d.func.gii', hem{h}, glm, map, sm));
+            summaryfile = fullfile(groupDir, sprintf('summary.%s.glm%d.%s.sm%d.func.gii', hem{h}, glm, map, sm));
+            %uwsummary.L.glm3.psc.sm8.func.gii
+            save(O, summaryfile);
+            fprintf(1, 'Done.\n');
+        end
+    case 'HRF:ROI_hrf_get'                   % Extract raw and estimated time series from ROIs
+                
+        sn = [];
+        ROI = 'all';
+        pre=10;
+%        post=30;
+        atlas = 'SSS';
+        glm = 0; % change this glm=1 for S01-06
+    
+%         vararginoptions(varargin,{'ROI','pre','post', 'glm', 'sn', 'atlas'});
+        vararginoptions(varargin,{'sn','glm','post'});
+        glmDir = fullfile(baseDir,sprintf(glmDir,glm));
+        T=[];
+    
+        subj_id = pinfo.subj_id{pinfo.sn==sn};
+        fprintf('%s\n',subj_id);
+    
+        % load SPM.mat
+        cd(fullfile(glmDir,subj_id));
+        SPM = load('SPM.mat'); SPM=SPM.SPM;
+        
+        % load ROI definition (R)
+        R = load(fullfile(baseDir, roiDir,[subj_id '_' atlas '_regions.mat'])); R=R.R;
+        
+        % extract time series data
+        [y_raw, y_adj, y_hat, y_res,B] = region_getts(SPM,R);
+        
+        D = spmj_get_ons_struct(SPM);
+        
+        for r=1:size(y_raw,2)
+            for i=1:size(D.block,1)
+                D.y_adj(i,:)=cut(y_adj(:,r),pre,round(D.ons(i))-1,post,'padding','nan')';
+                D.y_hat(i,:)=cut(y_hat(:,r),pre,round(D.ons(i))-1,post,'padding','nan')';
+                D.y_res(i,:)=cut(y_res(:,r),pre,round(D.ons(i))-1,post,'padding','nan')';
+                D.y_raw(i,:)=cut(y_raw(:,r),pre,round(D.ons(i))-1,post,'padding','nan')';
+%                 D.y_adj(i,:)=cut(y_adj(:,r),pre,round(D.ons(i)),post,'padding','nan')';
+%                 D.y_hat(i,:)=cut(y_hat(:,r),pre,round(D.ons(i)),post,'padding','nan')';
+%                 D.y_res(i,:)=cut(y_res(:,r),pre,round(D.ons(i)),post,'padding','nan')';
+%                 D.y_raw(i,:)=cut(y_raw(:,r),pre,round(D.ons(i)),post,'padding','nan')';
+            end
+            
+            % Add the event and region information to tje structure. 
+            len = size(D.event,1);                
+            D.SN        = ones(len,1)*sn;
+            D.region    = ones(len,1)*r;
+            D.name      = repmat({R{r}.name},len,1);
+%            D.hem       = repmat({R{r}.hem},len,1);
+            D.type      = D.event; 
+            T           = addstruct(T,D);
+        end
+        
+        save(fullfile(baseDir,roiDir, sprintf('%s_glm%d_hrf.mat',subj_id,glm)),'T'); 
+        varargout{1} = T;
+
+   
+    case 'HRF:ROI_hrf_plot'                 % Plot extracted time series
+        % s = varargin{1};
+        % roi = varargin{2}; 
+        vararginoptions(varargin,{'sn','roi','glm','post'});
+        subj_id = pinfo.subj_id{pinfo.sn==sn};
+        regname = {'SMA','PMv','PMd','M1','S1','SPLa','SPLp','DSVC','MT+','VSVC','EAC'}
+        load(fullfile(baseDir,roiDir,sprintf('%s_glm%d_hrf.mat',subj_id,glm))); % load T 
+        T = getrow(T,T.region==roi);
+        pre = 10;
+%        post = 30;
+        % Select a specific subset of things to plot 
+        if glm==2
+            T.type(find(T.type==6))=5; %% BothRep
+            T.type(find(T.type==4))=3; %% CueOnlyRep
+            subset  = find(T.type==3 | T.type==5);
+        elseif glm==0
+            subset = find(T.type==1);
+        end
+       % figure;        
+%         traceplot([-pre:post],T.y_adj,'errorfcn','stderr',...
+%             'split',[T.type],'subset',subset,...
+%             'leg',regname{roi},'leglocation','bestoutside'); % ,
+        traceplot([-pre:post],T.y_adj,'errorfcn','stderr',...
+            'split',[T.type],'subset',subset); % ,
+        hold on;
+        traceplot([-pre:post],T.y_hat,'linestyle','--',...
+            'split',[T.type],'subset',subset,...
+            'linewidth',3); % ,
+        drawline([-8 8 16],'dir','vert','linestyle','--');
+        drawline([0],'dir','horz','linestyle','--');
+        hold off;
+        xlabel('TR');
+        ylabel('activation');
+        title(sprintf('ROI: %s',regname{roi}));
+        drawline(0);
+
+
     case 'ROI:findall' % use this...
         h=1;
         surf='32';
@@ -1234,7 +1601,7 @@ switch(what)
         ROI{1,10}={'L_FFC_ROI','L_VVC_ROI','L_V8_ROI','L_VMV1_ROI','L_VMV2_ROI','L_VMV3_ROI','L_PIT_ROI'}; % VSVC
         ROI{1,11}={'L_RI_ROI','L_MBelt_ROI','L_PBelt_ROI','L_A1_ROI','L_LBelt_ROI'}; % EAC
         
-        ROI_name={'','SMA','PMv','PMd','M1','S1','SPLa','SPLp','DSVC','MT+','VSVC','EAC'};
+        ROI_name={'SMA','PMv','PMd','M1','S1','SPLa','SPLp','DSVC','MT+','VSVC','EAC'};
                 
         pathtosurf=fullfile(atlasDir,sprintf('FS_LR_%s',surf));
         P_glasser=gifti(fullfile(pathtosurf,sprintf('Glasser_2016.%sk.%s.label.gii',surf,hem{h})));
@@ -1269,7 +1636,7 @@ switch(what)
     case 'ROI:redefine' % use this...
         hemis=1;
         % sn=subj_vec;
-        glm=1;
+        glm=0;  % change this glm=1 for S01-S06
         surf='32';        
         [P,ROI_name]=sss_imana('ROI:findall');        
         vararginoptions(varargin,{'sn'});

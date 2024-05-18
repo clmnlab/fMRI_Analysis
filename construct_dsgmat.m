@@ -30,10 +30,12 @@ end
 behavDir        = 'behavDir';           % Timing data from the scanner
 dat_format = 'sub-S%.2d/ssh__S%.2d.dat';
 S = dload(fullfile(workdir, behavDir, sprintf(dat_format, s, s)));
-nRun = length(unique(S.BN)); % 8, 6 for S04
-nTR = length(unique(S.TN)); % 68
+%nRun = length(unique(S.BN)); % 8, 6 for S04
+%nTR = length(unique(S.TN)); % 68
+nRun = 8;
+nTR = 68;
 for r=1:nRun
-    dat_format = 'sub-S%.2d/ssh__S%.2d_%.2d.mov';
+%    dat_format = 'sub-S%.2d/ssh__S%.2d_%.2d.mov';
 %    mov = movload(fullfile(workdir, behavDir, sprintf(data_format, s, s, r)));
     idx = find(S.BN==r);
     tS(r,S.cueP(idx) == seqID(1) & S.seqType(idx)==0) = 0;
@@ -47,7 +49,9 @@ for r=1:nRun
     R.isError(r,:) = S.isError(idx);
 
     for t=1:nTR
-        R.onset(r,t) = (S.startTimeReal(idx(t)) + 1000 + S.RT(idx(t)))/1000;
+        % R.onset(r,t) = (S.startTimeReal(idx(t)) + 1000 + S.RT(idx(t)))/1000;
+        R.onset(r,t) = S.startTimeReal(idx(t))/1000;
+
         if S.RT(idx(t))==0
             R.dur(r,t)=0;  %% invalid trials 
         else    
@@ -107,14 +111,26 @@ R.repboth_transID = repbothID;
 R.nrep_transID = nrepID;
 R.nint_transID = nintID;
 R.cond = zeros(nRun,nTR);
-if glm==1
+if glm==0
+    R.cond = ones(1,nTR); 
+    idx = find(S.BN==9);
+%     R.onset = (S.startTimeReal(idx) + 1000 + S.RT(idx))/1000;
+    R.onset = S.startTimeReal(idx)/1000;
+elseif glm==1
     R.cond = repmat([1:nTR],nRun, 1);
 elseif glm==2 % motor or cue repetition
-    R.cond(R.isRepMotor==1 & R.isRepBoth==0)=1;
-    R.cond(R.isRepCue==1 & R.isRepBoth==0)=2;
-    R.cond(R.isRepBoth)=3;
-    R.cond(R.isNRep)=4;
-    R.cond(R.isNint)=5;
+    R.cond(R.isRepMotor==1 & R.isRepBoth==0 & R.isLetter==1)=1;
+    R.cond(R.isRepMotor==1 & R.isRepBoth==0 & R.isSpatial==1)=2;
+
+    R.cond(R.isRepCue==1 & R.isRepBoth==0 & R.isLetter==1)=3;
+    R.cond(R.isRepCue==1 & R.isRepBoth==0 & R.isSpatial==1)=4;
+
+    R.cond(R.isRepBoth & R.isLetter==1)=5;
+    R.cond(R.isRepBoth & R.isSpatial==1)=6;
+    R.cond(R.isNRep & R.isLetter==1)=7;
+    R.cond(R.isNRep & R.isSpatial==1)=8;
+    R.cond(R.isNint)=9;
+    
 elseif glm==3
     R.cond = tS+1;
     R.cond(R.isError==1 | R.isValid==0)=9;

@@ -53,14 +53,15 @@ glmDir = '/glm_%d';
 roiDir = 'ROI';
 
 pathToSave = fullfile(baseDir,'Figures');
-
+% 
 % addpath(genpath(['/srv/diedrichsen/matlab/dataframe']));
-% addpath(genpath(fullfile(workdir,'scripts')));
+% addpath(genpath('/home/ROBARTS/skim2764/Documents/MATLAB/scripts'));
 % addpath(genpath(fullfile(workdir,behavDir)));
 % addpath(genpath(fullfile(workdir,BIDSDir)));
 % addpath(genpath('/home/ROBARTS/skim2764/imaging_tools'));
 % addpath(genpath('/srv/diedrichsen/matlab/imaging/surfing'));
 % addpath(genpath('/srv/diedrichsen/matlab/imaging/freesurfer'));
+% addpath(genpath('/srv/diedrichsen/matlab/spm12'));
 %% subject info
 
 % Read info from participants .tsv file 
@@ -747,140 +748,14 @@ switch(what)
         source = fullfile(baseDir,imagingDir,subj_id, 'rmask_gray.nii');
         dest = fullfile(baseDir, anatomicalDir,subj_id,'rmask_gray.nii');
         movefile(source,dest);
-        % end
-        
-    case 'HRF:fit' % finding optimal parameters for hrf
-        % we have a instruction and a movement trial type and we want to
-        % find a set of parameter that works for both. The important thing
-        % is that the duration of underlying neural event is the only thing
-        % that is different between these two trial types.
-        regSide = [1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2];
-        regType=[1 2 3 4 5 6 7 8 1 2 3 4 5 6 7 8];
-        sn = subj_vec;
-        glm = 2;
-        regN = [2 3]; % M1 and PMd
-        duration = 0;
-        onsetshift = 0;
-        pre = 5;
-        post = 25;
-        fig = 1;
-        vararginoptions(varargin, {'sn', 'glm', 'regN', 'duration', 'onsetshift', 'pre', 'post', 'fig'});
-        cwd = pwd;
-        
-        
-        % loop over the subject - TODO: group fitting
-        for s = sn
-            % initialize
-            %T = [];
-            %FIT = [];
-            
-            fprintf('subject %.2d\n', s);
-            
-            cd(fullfile(sprintf(glmDir, glm), sprintf('s%02d', s))); % cd to subject's GLM dir
-            load SPM;
-            
-            % updating the filenames - since I ran the code on server
-            if ~strcmp(fullfile(sprintf(glmDir, glm), sprintf('s%02d', s)), SPM.swd) % need to rename SPM
-                SPM = spmj_move_rawdata(SPM, fullfile(imagingDir, sprintf('s%02d', s)));
-            end
-            
-            load(fullfile(roiDir, sprintf('%s_Brodmann_regions.mat', sprintf('s%02d', s))));
-            %load(fullfile(roiDir, sprintf('%s_Wang_regions.mat', sprintf('s%02d', s))));
-            R = R(regN); % only use the specified regions
-            
-            Data = region_getdata(SPM.xY.VY, R);
-            
-            reg=[];
-            data=[];
-            for i = 1:length(Data)
-                reg = [reg ones(1,size(Data{i},2))*regN(i)];
-                data = [data Data{i}];
-            end
-            clear Data
-            
-            Y = spm_filter(SPM.xX.K, SPM.xX.W*data); % filter out low-frequence trends in Y
-            Yres = spm_sp('r', SPM.xX.xKXs, Y);
-            err_before = sum(sum(Yres.^2))/numel(Yres);
-            
-            for r = 1:length(SPM.nscan)
-                for u=1:length(SPM.Sess(r).U)
-                    SPM.Sess(r).U(u).dur = ones(size(SPM.Sess(r).U(u).dur))*duration;
-                    SPM.Sess(r).U(u).ons = SPM.Sess(r).U(u).ons+onsetshift;
-                end
-                SPM.Sess(r).U=spm_get_ons(SPM,r);
-            end
-            
-            % Fit a common hrf for specified regions
-            [P, SPM, Yhat, Yres] = fit_hrf(SPM, data, 'P0', [18 2]','fit',[1 2]');  % 'fit',[1,2]'  
-            
-            % Check Error after
-            err_after = sum(sum(Yres.^2))/numel(Yres);
-            
-            % Extract evoked response
-            D = spmj_get_ons_struct(SPM);
-            
-            D.numPresses = zeros(size(D.event));
-            D.numPresses(D.event<=3) = 1;
-            D.numPresses(D.event>3 & D.event<7) = 3;
-            D.cond = D.event;
-            D.cond(D.event>3 & D.event<7) = D.event(D.event>3 & D.event<7)-3;
-            D.cond(D.event==7) = 4; % instruction
-            
-            T=[];
-            for r = regN
-                y_hat = mean(Yhat(:,reg==r), 2); % mean across voxels in each region
-                y_res = mean(Yres(:,reg==r), 2);
-                y_real = mean(Y(:,reg==r), 2);
-                for i = 1:size(D.block,1)
-                    D.y_hat(i,:) = cut(y_hat,pre,round(D.ons(i)),post,'padding','nan')';
-                    D.y_res(i,:) = cut(y_res,pre,round(D.ons(i)),post,'padding','nan')';
-                    D.y_real(i,:) = cut(y_real,pre,round(D.ons(i)),post,'padding','nan')';
-                    D.y_adj(i,:) = D.y_hat(i,:)+D.y_res(i,:);
-                end
-                D.region = ones(size(D.event,1),1)*r;
-                D.sn = ones(size(D.event,1),1)*s;
-                T = addstruct(T,D);
-            end
-            T.regType = regType(T.region)';
-            T.regSide = regSide(T.region)';
-            T.hand = 2*ones(size(T.region)); % only right hand
-            
-            %T = addstruct(T,D);
-            
-            if (fig==1)
-                %subplot(2,1,1);
-                figure()
-                op2_imana('HRF:plot_reg', T, s, [2]);
-                title(sprintf('Subj %d, Error: %2.3f', s, err_after));
-                
-                %subplot(2,1,2);
-                %op2_imana('HRF:plot_reg',Tnew,s,[2 3 6 8]);
-                %title(sprintf('Error: %2.3f',err_after));
-                
-                %keyboard;
-            end
-            
-            F.P = P';
-            F.bf = SPM.xBF.bf';
-            F.err_before = err_before;
-            F.err_after = err_after;
-            
-            %FIT = addstruct(FIT,F);
-            
-            % save
-            save(fullfile(roiDir, sprintf('%s_hrf_ROI_timeseries_glm%d.mat', sprintf('s%02d', s), glm)), '-struct', 'T');
-            save(fullfile(roiDir, sprintf('%s_hrf_fit_glm%d.mat', sprintf('s%02d', s), glm)), '-struct', 'F');
-            
-            cd(cwd)
-        end
-        
+        % end      
 
     case 'GLM:design'
         % handling input args:
         sn = [];
         prefix = 'u';
-        % TODO
-        hrf_params = [4 10];
+        % TODOfreesurferDir
+        hrf_params = [6 16];
         hrf_cutoff = 128;
         cvi_type = 'wls';
         nTR = 410; %% modify when necessary
@@ -1006,17 +881,12 @@ switch(what)
         J.mthresh = 0.05;
         J.cvi_mask = {fullfile(baseDir, anatomicalDir, sprintf('S%02d', sn), 'rmask_gray.nii')};
         J.cvi = cvi_type;
-
+        
+        
+        
         % Save the GLM file for this subject.
         spm_rwls_run_fmri_spec(J);
-        % dsave(fullfile(J.dir{1},sprintf('%s_reginfo.tsv', subj_str{s})), T);
-        if glm==0
-            save(fullfile(J.dir{1}, 'SPM_info_run9.mat'),'R');            
-        else
-            save(fullfile(J.dir{1}, 'SPM_info.mat'),'R');
-        end
-        % save(fullfile(J.dir{1}, 'SPM_info.mat'),'-struct','T');
-    
+        save(fullfile(J.dir{1}, 'SPM_info.mat'),'R');
     
     case 'GLM:estimate' % estimate beta coefficient
         % Estimate the GLM from the appropriate SPM.mat file.
@@ -1498,18 +1368,18 @@ switch(what)
         % find a set of parameter that works for both. The important thing
         % is that the duration of underlying neural event is the only thing
         % that is different between these two trial types.
-        regSide = [1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2];
-        regType=[1 2 3 4 5 6 7 8 1 2 3 4 5 6 7 8];
+
         sn = subj_vec;
-        glm = 2;
-        regN = [2 3]; % M1 and PMd
-        duration = 0;
+        glm = 0;
+        regN = [1:7]; % SMA, PMv, PMd, M1, S1, aSPL, pSPL
+        duration = 1;
         onsetshift = 0;
         pre = 5;
         post = 25;
         fig = 1;
-        vararginoptions(varargin, {'sn', 'glm', 'regN', 'duration', 'onsetshift', 'pre', 'post', 'fig'});
-        cwd = pwd;
+%         vararginoptions(varargin, {'sn', 'glm', 'regN', 'duration', 'onsetshift', 'pre', 'post', 'fig'});
+        vararginoptions(varargin, {'sn','regN'});
+%         cwd = pwd;
         
         
         % loop over the subject - TODO: group fitting
@@ -1526,9 +1396,9 @@ switch(what)
             % % updating the filenames - since I ran the code on server
             % if ~strcmp(fullfile(baseDir,sprintf(glmDir, glm), sprintf('S%02d', s)), SPM.swd) % need to rename SPM
             %     SPM = spmj_move_rawdata(SPM, fullfile(imagingDir, sprintf('S%02d', s)));
-            % end
+            % endS
             
-            load(fullfile(baseDir, roiDir, sprintf('%s_Brodmann_regions.mat', sprintf('s%02d', s))));
+            load(fullfile(baseDir, roiDir, sprintf('%s_SSS_regions.mat', sprintf('S%02d', s)))); % Load R
             %load(fullfile(roiDir, sprintf('%s_Wang_regions.mat', sprintf('s%02d', s))));
             R = R(regN); % only use the specified regions
             
@@ -1546,76 +1416,44 @@ switch(what)
             Yres = spm_sp('r', SPM.xX.xKXs, Y);
             err_before = sum(sum(Yres.^2))/numel(Yres);
             
-            for r = 1:length(SPM.nscan)
-                for u=1:length(SPM.Sess(r).U)
-                    SPM.Sess(r).U(u).dur = ones(size(SPM.Sess(r).U(u).dur))*duration;
-                    SPM.Sess(r).U(u).ons = SPM.Sess(r).U(u).ons+onsetshift;
-                end
-                SPM.Sess(r).U=spm_get_ons(SPM,r);
-            end
+%             for r = 1:length(SPM.nscan)
+%                 for u=1:length(SPM.Sess(r).U)
+%                     SPM.Sess(r).U(u).dur = ones(size(SPM.Sess(r).U(u).dur))*duration;
+%                     SPM.Sess(r).U(u).ons = SPM.Sess(r).U(u).ons+onsetshift;
+%                 end
+%                 SPM.Sess(r).U=spm_get_ons(SPM,r);
+%             end
             
             % Fit a common hrf for specified regions
-            [P, SPM, Yhat, Yres] = fit_hrf(SPM, data, 'P0', [18 2]','fit',[1 2]');  % 'fit',[1,2]'  
-            
+%             [SPMf, Yhat, Yres] = fit_hrf(SPM, data);  % 'fit',[1,2]'  
+            [SPMf, Yhat, Yres, p_opt] = fit_spm_hrf(SPM, data);  % 'fit',[1,2]'  
             % Check Error after
             err_after = sum(sum(Yres.^2))/numel(Yres);
-            
-            % Extract evoked response
-            D = spmj_get_ons_struct(SPM);
-            
-            D.numPresses = zeros(size(D.event));
-            D.numPresses(D.event<=3) = 1;
-            D.numPresses(D.event>3 & D.event<7) = 3;
-            D.cond = D.event;
-            D.cond(D.event>3 & D.event<7) = D.event(D.event>3 & D.event<7)-3;
-            D.cond(D.event==7) = 4; % instruction
-            
-            T=[];
-            for r = regN
-                y_hat = mean(Yhat(:,reg==r), 2); % mean across voxels in each region
-                y_res = mean(Yres(:,reg==r), 2);
-                y_real = mean(Y(:,reg==r), 2);
-                for i = 1:size(D.block,1)
-                    D.y_hat(i,:) = cut(y_hat,pre,round(D.ons(i)),post,'padding','nan')';
-                    D.y_res(i,:) = cut(y_res,pre,round(D.ons(i)),post,'padding','nan')';
-                    D.y_real(i,:) = cut(y_real,pre,round(D.ons(i)),post,'padding','nan')';
-                    D.y_adj(i,:) = D.y_hat(i,:)+D.y_res(i,:);
-                end
-                D.region = ones(size(D.event,1),1)*r;
-                D.sn = ones(size(D.event,1),1)*s;
-                T = addstruct(T,D);
-            end
-            T.regType = regType(T.region)';
-            T.regSide = regSide(T.region)';
-            T.hand = 2*ones(size(T.region)); % only right hand
-            
-            %T = addstruct(T,D);
-            
-            if (fig==1)
-                %subplot(2,1,1);
-                figure()
-                op2_imana('HRF:plot_reg', T, s, [2]);
-                title(sprintf('Subj %d, Error: %2.3f', s, err_after));
-                
-                %subplot(2,1,2);
-                %op2_imana('HRF:plot_reg',Tnew,s,[2 3 6 8]);
-                %title(sprintf('Error: %2.3f',err_after));
-                
-                %keyboard;
-            end
-            
-            F.P = P';
             F.bf = SPM.xBF.bf';
             F.err_before = err_before;
             F.err_after = err_after;
+            [err_before err_after p_opt']
+            g = 0;
+            sss_imana('HRF:ROI_hrf_get','sn',s,'glm',g,'post',20);
+            figure;
+            for r=1:8
+                subplot(2,4,r);
+                sss_imana('HRF:ROI_hrf_plot','sn',s,'roi',r,'glm',g,'post',20);
+            end
+            
+            sss_imana('HRF:ROI_hrf_get','sn',s,'glm',g,'post',20,'bf',SPMf.xBF.bf);
+            figure;
+            for r=1:8
+                subplot(2,4,r);
+                sss_imana('HRF:ROI_hrf_plot','sn',s,'roi',r,'glm',g,'post',20);
+            end
+            
             
             %FIT = addstruct(FIT,F);
             
             % save
-            save(fullfile(roiDir, sprintf('%s_hrf_ROI_timeseries_glm%d.mat', sprintf('s%02d', s), glm)), '-struct', 'T');
-            save(fullfile(roiDir, sprintf('%s_hrf_fit_glm%d.mat', sprintf('s%02d', s), glm)), '-struct', 'F');
-            
-            cd(cwd)
+%             save(fullfile(baseDir, roiDir, sprintf('%s_hrf_ROI_timeseries_glm%d.mat', sprintf('S%02d', s), glm)), '-struct', 'T');
+%             save(fullfile(baseDir, roiDir, sprintf('%s_hrf_fit_glm%d.mat', sprintf('S%02d', s), glm)), '-struct', 'F');            
         end
 
     case 'HRF:ROI_hrf_get'                   % Extract raw and estimated time series from ROIs
@@ -1626,9 +1464,9 @@ switch(what)
 %        post=30;
         atlas = 'SSS';
         glm = 0; % change this glm=1 for S01-06
-    
+        bf = [];
 %         vararginoptions(varargin,{'ROI','pre','post', 'glm', 'sn', 'atlas'});
-        vararginoptions(varargin,{'sn','glm','post'});
+        vararginoptions(varargin,{'sn','glm','post','bf'});
         glmDir = fullfile(baseDir,sprintf(glmDir,glm));
         T=[];
     
@@ -1638,6 +1476,10 @@ switch(what)
         % load SPM.mat
         cd(fullfile(glmDir,subj_id));
         SPM = load('SPM.mat'); SPM=SPM.SPM;
+        if ~isempty(bf)
+            SPM.xBF.bf = bf;
+            SPM = fMRI_design_changeBF(SPM);
+        end
         
         % load ROI definition (R)
         R = load(fullfile(baseDir, roiDir,[subj_id '_' atlas '_regions.mat'])); R=R.R;
@@ -1678,7 +1520,7 @@ switch(what)
         % roi = varargin{2}; 
         vararginoptions(varargin,{'sn','roi','glm','post'});
         subj_id = pinfo.subj_id{pinfo.sn==sn};
-        regname = {'SMA','PMv','PMd','M1','S1','SPLa','SPLp','DSVC','MT+','VSVC','EAC'}
+        regname = {'SMA','PMv','PMd','M1','S1','SPLa','SPLp','DSVC','MT+','VSVC','EAC'};
         load(fullfile(baseDir,roiDir,sprintf('%s_glm%d_hrf.mat',subj_id,glm))); % load T 
         T = getrow(T,T.region==roi);
         pre = 10;
